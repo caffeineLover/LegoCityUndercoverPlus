@@ -11,9 +11,28 @@
 
 ## Installation
 
-- Download latest release
-- Extract contents into LEGO City Undercover installation folder (where LEGOLCUR_DX11.exe is located)
-- Play!
+- Close the game. Only Windows x64 executable **1.0.0.15609011** is supported.
+- Download and extract the complete release ZIP to a separate folder.
+- Preserve your game's **original** `steam_api64.dll` before installing the mod.
+  The package does not include proprietary Steam/GOG DLLs.
+- Run the package's `Install.ps1` with your game directory and `-Edition Steam`
+  (or `GOG`). It preserves and verifies the original backend before replacement.
+- Follow the [installation, upgrade, rollback, and troubleshooting guide](docs/INSTALL.md).
+  Do not simply overwrite the original DLL. If v1.0.0 already replaced it,
+  recover it from a backup or your storefront's Verify/Repair first.
+
+## Build and package
+
+With Visual Studio 2026 C++ tools (v145) and the Windows SDK installed:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-Release.ps1
+```
+
+This builds Release x64, runs the existing and startup/proxy regression tests,
+then creates and checks a local ZIP under `Release/packages/`. It never publishes
+a release or includes proprietary backend binaries. See the
+[startup investigation and v1.0.1 checklist](docs/release-startup-analysis.md).
 
 ## Usage
 

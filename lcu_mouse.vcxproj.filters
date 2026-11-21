@@ -48,6 +48,9 @@
     <ClCompile Include="src\game\dllmain.cpp">
       <Filter>src\game</Filter>
     </ClCompile>
+    <ClCompile Include="src\steam_proxy\ProxyLoader.cpp">
+      <Filter>src\steam_proxy</Filter>
+    </ClCompile>
     <ClCompile Include="src\input\RawInput.cpp">
       <Filter>src\input</Filter>
     </ClCompile>
@@ -81,6 +84,9 @@
       <Filter>src\input</Filter>
     </ClInclude>
     <ClInclude Include="src\steam_proxy\Proxy.h">
+      <Filter>src\steam_proxy</Filter>
+    </ClInclude>
+    <ClInclude Include="src\steam_proxy\ProxyLoader.h">
       <Filter>src\steam_proxy</Filter>
     </ClInclude>
     <ClInclude Include="src\third_party\mini\ini.h">
@@ -119,6 +125,15 @@
   <ItemGroup>
     <None Include="src\steam_proxy\steam_api64.def">
       <Filter>src\steam_proxy</Filter>
+    </None>
+    <None Include="src\steam_proxy\ProxyExports.inc">
+      <Filter>src\steam_proxy</Filter>
+    </None>
+    <None Include="src\tests\ProxyLoaderTests.cpp">
+      <Filter>src\tests</Filter>
+    </None>
+    <None Include="src\tests\HookStartupTests.cpp">
+      <Filter>src\tests</Filter>
     </None>
     <None Include="src\tests\MouseCameraStateTests.cpp">
       <Filter>src\tests</Filter>

@@ -19,6 +19,9 @@
 #include <mutex>
 #include <sstream>
 #include <type_traits>
+#include <cstdlib>
+#include <iterator>
+#include <vector>
 
 #define DEBUG_PRINTF(...) {char cad[512]; sprintf(cad, __VA_ARGS__);  OutputDebugStringA(cad);}
 
@@ -31,7 +34,7 @@ struct ButtonEvent
 };
 
 typedef void(__fastcall* UPDATECAM)(__int64, float*, float*, float, int, int, char, char, __int64);
-static_assert(std::is_void<std::result_of<UPDATECAM(__int64, float*, float*, float, int, int, char, char, __int64)>::type>::value,
+static_assert(std::is_void<std::invoke_result<UPDATECAM, __int64, float*, float*, float, int, int, char, char, __int64>::type>::value,
 	"The game's camera update routine has no return value");
 UPDATECAM fpUpdateCam = nullptr;
 
@@ -1021,133 +1024,242 @@ static bool WriteConfigFile(mINI::INIFile& file, mINI::INIStructure& ini)
 
 
 
-BOOL APIENTRY DllMain(HMODULE hModule,
-	DWORD  ul_reason_for_call,
-	LPVOID lpReserved
-)
+namespace
 {
-	switch (ul_reason_for_call)
+	std::wstring modDirectory;
+	lcu_proxy::Module originalProxy;
+	bool modInitialized = false;
+	bool minHookInitialized = false;
+
+	void ReleaseStartupResources() noexcept
 	{
-	case DLL_PROCESS_ATTACH:
-	{
-		//MessageBoxW(NULL, L"Loaded", L"Debug", MB_OK);
-
-		uintptr_t moduleBase = (uintptr_t)GetModuleHandle(nullptr);
-
-		TCHAR modulePath[MAX_PATH];
-		GetModuleFileName(hModule, modulePath, MAX_PATH);
-
-		// Extract directory from module path
-		TCHAR moduleDir[MAX_PATH];
-		_tcscpy_s(moduleDir, MAX_PATH, modulePath);
-		TCHAR* lastBackslash = _tcsrchr(moduleDir, _T('\\'));
-		if (lastBackslash) {
-			*lastBackslash = _T('\0');
-		}
-
-		// Check if gog.ico exists
-		TCHAR launchPath[MAX_PATH];
-		_sntprintf_s(launchPath, MAX_PATH, _TRUNCATE, _T("%s\\gog.ico"), moduleDir);
-
-		const TCHAR* steam_dllPath = _T("proxy\\steam_api64_steam.dll");
-		const TCHAR* gog_dllPath = _T("proxy\\steam_api64_gog.dll");
-
-		// Choose DLL path based on gog icon
-		const TCHAR* dllPath = (GetFileAttributes(launchPath) != INVALID_FILE_ATTRIBUTES) ? gog_dllPath : steam_dllPath;
-
-		steam_api64.dll = LoadLibrary(dllPath);
-		setupFunctions();
-
-		try {
-			mINI::INIFile file("lcu.ini");
-			mINI::INIStructure ini;
-
-			if (ReadConfigFile(file, ini))
+		if (minHookInitialized)
+		{
+			const MH_STATUS status = MH_Uninitialize();
+			if (status != MH_OK)
 			{
-				// Load only the new mouse/window settings. The retired [settings]
-				// hotkey and sensitivity entries are deliberately ignored.
-				configSettings = lcu_config::LoadSettings(ini);
-
-				// These separate game-input bindings are retained for existing users;
-				// they are not accepted as mouse-camera or window-mode toggle keys.
-				if (ini.has("settings"))
+				// Returning FALSE would let Windows unload this DLL while a
+				// surviving enabled detour could still point into its code.
+				try
 				{
-					const auto collection = ini.get("settings");
-					if (collection.has("leftclick"))
+					lcu_proxy::ReportFailure(modDirectory,
+						{ L"MinHook rollback", ERROR_DLL_INIT_FAILED, MH_StatusToString(status) },
+						L"Hook rollback failed; terminating instead of unloading live detours.");
+				}
+				catch (...)
+				{
+					// Diagnostics may allocate. Even if they fail, never unwind
+					// past this point and allow a DLL with live detours to unload.
+					OutputDebugStringW(L"LCUP: hook rollback failed; terminating.\n");
+				}
+				TerminateProcess(GetCurrentProcess(), ERROR_DLL_INIT_FAILED);
+				std::abort();
+			}
+			minHookInitialized = false;
+		}
+		if (originalProxy.handle)
+		{
+			FreeLibrary(originalProxy.handle);
+			originalProxy = {};
+		}
+		std::fill(std::begin(proxyFunctions), std::end(proxyFunctions), nullptr);
+	}
+
+	bool IsSupportedExecutable()
+	{
+		wchar_t path[32768] = {};
+		const DWORD length = GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path)));
+		if (!length || length >= std::size(path))
+		{
+			return false;
+		}
+		DWORD ignored = 0;
+		const DWORD size = GetFileVersionInfoSizeW(path, &ignored);
+		std::vector<unsigned char> data(size);
+		if (!size || !GetFileVersionInfoW(path, 0, size, data.data()))
+		{
+			return false;
+		}
+		struct Translation { WORD language; WORD codepage; };
+		Translation* translations = nullptr;
+		UINT translationSize = 0;
+		if (!VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation",
+			reinterpret_cast<void**>(&translations), &translationSize))
+		{
+			return false;
+		}
+		// The advertised build component exceeds a WORD; compare FileVersion
+		// text rather than truncating 15609011 into VS_FIXEDFILEINFO fields.
+		for (UINT i = 0; i < translationSize / sizeof(Translation); ++i)
+		{
+			wchar_t query[80] = {};
+			swprintf_s(query, L"\\StringFileInfo\\%04x%04x\\FileVersion",
+				translations[i].language, translations[i].codepage);
+			wchar_t* version = nullptr;
+			UINT versionLength = 0;
+			if (VerQueryValueW(data.data(), query, reinterpret_cast<void**>(&version), &versionLength) &&
+				versionLength && std::wstring(version) == L"1.0.0.15609011")
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+}
+
+extern "C"
+{
+	FARPROC proxyFunctions[lcu_proxy::ExportCount] = {};
+
+	__declspec(noreturn) void FailMissingProxyExport(unsigned int index)
+	{
+		lcu_proxy::Failure failure = { L"selected original game DLL", ERROR_PROC_NOT_FOUND,
+			index < lcu_proxy::ExportCount ? lcu_proxy::ExportNames[index] : "invalid export index" };
+		lcu_proxy::ReportFailure(modDirectory, failure, L"The selected backend does not provide the requested export.");
+		// No signature-independent return value is safe. Never jump to null or
+		// pretend success for an unavailable API.
+		TerminateProcess(GetCurrentProcess(), ERROR_PROC_NOT_FOUND);
+		std::abort();
+	}
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
+{
+	if (reason == DLL_PROCESS_ATTACH)
+	{
+		try
+		{
+			lcu_proxy::Failure failure;
+			if (!lcu_proxy::GetModuleDirectory(hModule, modDirectory, failure))
+			{
+				lcu_proxy::ReportFailure(modDirectory, failure, L"Cannot locate the installed mod DLL.");
+				return FALSE;
+			}
+			const DWORD gogAttributes = GetFileAttributesW((modDirectory + L"\\gog.ico").c_str());
+			const bool gog = gogAttributes != INVALID_FILE_ATTRIBUTES &&
+				(gogAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+			const std::wstring path = modDirectory + (gog ?
+				L"\\proxy\\steam_api64_gog.dll" : L"\\proxy\\steam_api64_steam.dll");
+			if (!lcu_proxy::LoadOriginal(path, gog, originalProxy, failure))
+			{
+				lcu_proxy::ReportFailure(modDirectory, failure,
+					L"Cannot initialize the original Steam/GOG DLL. The game cannot start with this installation.");
+				return FALSE;
+			}
+			std::copy(originalProxy.functions.begin(), originalProxy.functions.end(), proxyFunctions);
+
+			// Never apply fixed RVAs to an unverified executable. Steam forwarding
+			// may continue, but this is NOT support for another game build.
+			if (!IsSupportedExecutable())
+			{
+				lcu_proxy::ReportFailure(modDirectory, { L"host executable", ERROR_REVISION_MISMATCH, {} },
+					L"Camera/input/window hooks disabled: only executable 1.0.0.15609011 is supported.");
+				return TRUE;
+			}
+
+			try
+			{
+				mINI::INIFile file("lcu.ini");
+				mINI::INIStructure ini;
+				if (ReadConfigFile(file, ini))
+				{
+					configSettings = lcu_config::LoadSettings(ini);
+					if (ini.has("settings"))
 					{
-						leftClickKey = static_cast<unsigned short>(
-							std::stoi(collection.get("leftclick"), 0, 16));
-					}
-					if (collection.has("rightclick"))
-					{
-						rightClickKey = static_cast<unsigned short>(
-							std::stoi(collection.get("rightclick"), 0, 16));
+						const auto collection = ini.get("settings");
+						if (collection.has("leftclick"))
+						{
+							leftClickKey = static_cast<unsigned short>(
+								std::stoi(collection.get("leftclick"), 0, 16));
+						}
+						if (collection.has("rightclick"))
+						{
+							rightClickKey = static_cast<unsigned short>(
+								std::stoi(collection.get("rightclick"), 0, 16));
+						}
 					}
 				}
 			}
-		}
-		catch (std::exception& ex)
-		{
-			DEBUG_PRINTF("Error %s", ex.what());
-		}
+			catch (const std::exception& ex)
+			{
+				DEBUG_PRINTF("Configuration error: %s\n", ex.what());
+			}
 
-		if (MH_Initialize() != MH_OK)
-		{
-			return FALSE;
+			MH_STATUS status = MH_Initialize();
+			if (status == MH_OK)
+			{
+				minHookInitialized = true;
+				const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+				// Existing, version-specific RVAs: no new camera/input offsets.
+				isFirstPerson = reinterpret_cast<int*>(moduleBase + 0x18152A4);
+				auto cameraUpdateFP = reinterpret_cast<LPVOID>(moduleBase + 0x991500);
+				auto wndProcFP = reinterpret_cast<LPVOID>(moduleBase + 0x449410);
+				fpKeyPress = reinterpret_cast<KEYPRESSFUNC>(moduleBase + 0x449940);
+				keyStates = reinterpret_cast<unsigned char*>(moduleBase + 0x1C2D870);
+				keyCounter = reinterpret_cast<unsigned char*>(moduleBase + 0x1C2D66C);
+				status = MH_CreateHook(cameraUpdateFP, &UpdateCamDetour, reinterpret_cast<LPVOID*>(&fpUpdateCam));
+				if (status == MH_OK)
+				{
+					status = MH_CreateHook(wndProcFP, &WndProc, reinterpret_cast<LPVOID*>(&fpWndProc));
+				}
+				// Create both first. A failure cannot leave one enabled hook
+				// pointing into a DLL whose initialization subsequently fails.
+				if (status == MH_OK)
+				{
+					status = MH_EnableHook(cameraUpdateFP);
+				}
+				if (status == MH_OK)
+				{
+					status = MH_EnableHook(wndProcFP);
+				}
+			}
+			if (status != MH_OK)
+			{
+				ReleaseStartupResources();
+				const std::string hookError = MH_StatusToString(status);
+				lcu_proxy::ReportFailure(modDirectory,
+					{ L"MinHook startup", ERROR_DLL_INIT_FAILED, hookError },
+					L"Cannot install camera/window hooks; rolling back partial initialization.");
+				return FALSE;
+			}
+			modInitialized = true;
 		}
-
-		isFirstPerson = reinterpret_cast<int*>(moduleBase + 0x18152A4);
-		auto cameraUpdateFP = reinterpret_cast<LPVOID>(moduleBase + 0x991500);
-		auto wndProcFP = reinterpret_cast<LPVOID>(moduleBase + 0x449410);
-		fpKeyPress = reinterpret_cast<KEYPRESSFUNC>(moduleBase + 0x449940);
-		keyStates = reinterpret_cast<unsigned char*>(moduleBase + 0x1C2D870);
-		keyCounter = reinterpret_cast<unsigned char*>(moduleBase + 0x1C2D66C);
-
-		if (MH_CreateHook(cameraUpdateFP, &UpdateCamDetour,
-			reinterpret_cast<LPVOID*>(&fpUpdateCam)) != MH_OK)
+		catch (...)
 		{
-			return FALSE;
-		}
-
-		if (MH_EnableHook(cameraUpdateFP) != MH_OK)
-		{
-			return FALSE;
-		}
-
-		if (MH_CreateHook(wndProcFP, &WndProc,
-			reinterpret_cast<LPVOID*>(&fpWndProc)) != MH_OK)
-		{
-			return FALSE;
-		}
-
-		if (MH_EnableHook(wndProcFP) != MH_OK)
-		{
+			ReleaseStartupResources();
+			try
+			{
+				lcu_proxy::ReportFailure(modDirectory, { L"DLL initialization", ERROR_DLL_INIT_FAILED, {} },
+					L"Unexpected initialization exception; refusing a partially initialized mod.");
+			}
+			catch (...) {}
 			return FALSE;
 		}
 	}
-	break;
-	case DLL_PROCESS_DETACH:
-		MH_Uninitialize();
-		FreeLibrary(steam_api64.dll);
-
-		try {
-			mINI::INIFile file("lcu.ini");
-			mINI::INIStructure ini;
-
-			// Home/End sensitivity changes are saved using the new [mouse] key;
-			// mINI's lazy write path retains existing explanatory comments/formatting.
-			if (ReadConfigFile(file, ini))
+	else if (reason == DLL_PROCESS_DETACH)
+	{
+		if (modInitialized)
+		{
+			try
 			{
-				WriteConfigFile(file, ini);
+				mINI::INIFile file("lcu.ini");
+				mINI::INIStructure ini;
+				if (ReadConfigFile(file, ini))
+				{
+					WriteConfigFile(file, ini);
+				}
+			}
+			catch (const std::exception& ex)
+			{
+				DEBUG_PRINTF("Configuration save error: %s\n", ex.what());
 			}
 		}
-		catch (std::exception& ex)
+		// At process termination the OS releases modules/threads. Do not suspend
+		// terminating threads via MinHook or recursively unload the backend.
+		if (!reserved)
 		{
-			DEBUG_PRINTF("Error %s", ex.what());
+			ReleaseStartupResources();
 		}
-
-		break;
 	}
-
 	return TRUE;
 }
