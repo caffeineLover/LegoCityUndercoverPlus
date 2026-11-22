@@ -1,112 +1,152 @@
-# Install, upgrade, and recover
+# Install LEGO City Undercover Plus
 
-LEGO City Undercover Plus is an unofficial mod based on twisted89's
-[mouse-support mod](https://github.com/twisted89/Lego-City-Undercover-Mouse-Support).
-Only Windows x64 executable **1.0.0.15609011** is supported. Other versions
-are not supported; the DLL refuses to apply its fixed camera/window offsets
-when that executable version cannot be verified.
+This is an unofficial mouse-camera mod based on
+[twisted89's mouse-support mod](https://github.com/twisted89/Lego-City-Undercover-Mouse-Support).
+It supports the Windows x64 game executable **1.0.0.15609011**.
 
-## Before you install
+## Before you start
 
-Close the game. Extract the entire ZIP to a separate folder first, not directly
-over your game. No Steam/GOG proprietary DLL is included. Use the original
-`steam_api64.dll` supplied with **your own installation of this game and edition**.
-Do not use another game's SDK DLL, a downloaded replacement, or the mod itself.
+1. Close the game.
+2. Extract the **entire release ZIP** to a separate folder, outside the game
+   folder. Keep its files and subfolders together.
+3. Make sure you have the original `steam_api64.dll` from your own Steam or
+   GOG installation. The mod needs this file to keep the game's Steam/GOG
+   functions working.
 
-If v1.0.0 already overwrote your original DLL, look for an existing original
-under `proxy/` or your backups. Otherwise uninstall the mod DLL, then use Steam's
-Verify integrity or GOG's Verify/Repair to restore the original. Verify/Repair
-may leave mod-added files behind; it does not prove that a renamed file is stock.
-Keep `lcu.ini` if you want to retain your settings.
+The ZIP includes `Install.ps1`, `Get-PeInfo.ps1`, the mod DLL, this guide,
+license notices, checksums, and source code. It does not include proprietary
+Steam/GOG DLLs.
 
-## Recommended installation
+**Already installed v1.0.0?** Check for an original DLL in `proxy/` or your
+backups. If you have none, remove the mod DLL and use Steam's Verify integrity
+or GOG's Verify/Repair to restore the original. Keep `lcu.ini` to retain your
+settings. Storefront repair can leave mod-added files behind, so a renamed DLL
+is not automatically a trustworthy original.
 
-From the extracted package folder, run Windows PowerShell (administrator rights
-are needed only if your game folder requires them):
+## Run the installer
+
+Open Windows PowerShell in the extracted package folder. Replace
+`C:\your\game` below with the folder containing `LEGOLCUR_DX11.exe`.
+
+For Steam:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -GameDirectory 'C:\your\game' -Edition Steam
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -GameDirectory 'C:\your\game' -Edition Steam -PackageDirectory .
 ```
 
-For GOG use `-Edition GOG`. Its installed `gog.ico` marker must be present and its
-original `Galaxy64.dll` and dependencies must remain installed beside the EXE.
-The script checks the supported executable version, package checksums, x64 API
-exports and common mod-proxy signatures. These are safeguards, not proof of a
-file's provenance: start from a known-clean storefront installation.
+For GOG:
 
-Before replacing anything, the script copies the original to the correct
-`proxy/` filename and verifies its SHA-256. An existing backend is validated and
-never overwritten. The root DLL is also copied into a content-addressed
-`lcup-backups/<SHA256>/` folder before replacement. The installed DLL's hash is
-checked against the package. Your INI is not overwritten.
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -GameDirectory 'C:\your\game' -Edition GOG -PackageDirectory .
+```
 
-The resulting layout is:
+Keep `-PackageDirectory .` in the command. It explicitly selects the folder
+you opened PowerShell in and avoids the default package-path lookup failure
+seen with this release. Use an administrator PowerShell only if your game
+folder requires administrator access.
+
+GOG's original `gog.ico`, `Galaxy64.dll`, and other dependencies must remain
+installed beside the game executable.
+
+The installer checks the game version, edition marker, package checksums, and
+DLL architecture/exports before changing files. It then:
+
+- Preserves the original DLL under the correct `proxy/` filename.
+- Saves the previous root DLL under `lcup-backups/<SHA256>/`, where the folder
+  name is that file's checksum.
+- Copies in the mod and verifies its checksum.
+
+Existing original DLLs and backups are not overwritten with different files.
+Your configuration is left alone. These checks catch common mistakes, but they
+cannot prove a DLL's origin; start with your own storefront copy.
+
+Launch the game through Steam or GOG after installation.
+
+## Installed files
+
+A Steam installation will have this layout:
 
 ```text
 LEGO City Undercover/
-  LEGOLCUR_DX11.exe           # version 1.0.0.15609011
-  steam_api64.dll             # this mod
+  LEGOLCUR_DX11.exe
+  steam_api64.dll                 # the mod
   proxy/
-    steam_api64_steam.dll     # original from YOUR Steam game, OR
-    steam_api64_gog.dll       # original from YOUR GOG game
-  gog.ico                    # GOG only; supplied by that installation
-  Galaxy64.dll               # GOG only; supplied by that installation
-  lcu.ini                    # generated on first supported game launch
-  lcup-backups/               # verified prior root DLLs; retain for recovery
+    steam_api64_steam.dll         # your original Steam DLL
+  lcu.ini                        # generated on first supported launch
+  lcup-backups/
+    <SHA256>/
+      steam_api64.dll             # the previous root DLL
 ```
 
-Only the backend for your edition is required. Paths are resolved relative to
-the installed mod DLL, so changing a shortcut's working directory cannot hide
-the backend. Existing INI lookup/persistence remains game-working-directory
-relative; launch normally through your storefront to retain existing behavior.
+GOG uses `proxy/steam_api64_gog.dll` instead, and keeps its original `gog.ico`
+and `Galaxy64.dll` beside the executable. Only your edition's original API
+DLL is needed.
 
-## Manual installation
-
-1. Close the game and confirm its executable version in Properties > Details.
-2. Make a separate verified backup of its original root `steam_api64.dll`.
-3. Create `proxy/` beside the EXE. Copy (do not merely move) that original into
-   `proxy/steam_api64_steam.dll` or `proxy/steam_api64_gog.dll` for your edition.
-4. Compare SHA-256 hashes of the original, separate backup, and backend copy
-   with `Get-FileHash -Algorithm SHA256`. Stop if they differ.
-5. Only now copy the package's root `steam_api64.dll` beside the EXE. Keep all
-   original GOG dependencies and the `gog.ico` marker. Compare the installed
-   mod DLL's hash with the package copy.
-6. Launch through Steam/GOG. Do not copy the package's `source/` folder into
-   your game. It is the exact corresponding source for this release.
+The mod finds the original DLL relative to its installed location.
+Configuration still uses the game's working directory; launching normally
+through the storefront keeps the existing settings behavior.
 
 ## Upgrade
 
-Close the game. Back up `lcu.ini` and the current mod DLL. Retain the original
-backend in `proxy/`; do **not** replace it with the old mod. Extract the new
-package elsewhere and run its installer with the same game path and edition.
-It preserves the backend and a verified copy of the prior root DLL.
+Close the game and back up your configuration. Extract the new package to a
+separate folder and run its installer with the same game path and edition.
+Keep the original DLL in `proxy/`; the previous mod DLL is not a replacement
+for it. The installer preserves a verified copy of the previous root DLL.
 
-## Rollback / uninstall
+## Remove the mod
 
-Close the game and run the same installer with `-Rollback` added. It validates
-the original backend, backs up the current root DLL, then restores the original
-to `steam_api64.dll`. It does not delete the backend, backups, or configuration.
-To return to an older mod instead, copy that mod from the appropriate verified
-`lcup-backups/<SHA256>/` folder to the root after saving the current DLL.
-If no trustworthy original remains, use your storefront's repair function.
+From the extracted package folder, run the same command with `-Rollback`.
+For Steam:
 
-## Startup diagnostics
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1 -GameDirectory 'C:\your\game' -Edition Steam -PackageDirectory . -Rollback
+```
 
-Check `lcu-startup.log` beside the installed mod. If that directory is not
-writable, check `%TEMP%\LegoCityUndercoverPlus-startup.log`. Messages also go to
-Windows debugger output. A backend failure identifies its absolute path,
-Windows error code/text, and a missing required export where applicable.
-Error 126 can mean the DLL **or one of its dependencies** is missing (notably
-GOG's `Galaxy64.dll`); 193 usually means a wrong-architecture or invalid DLL;
-127 means an incompatible API/export set. The game may additionally show a
-generic DLL initialization error (1114).
+Use `-Edition GOG` for GOG. Rollback checks the package, backs up the current
+mod DLL, and restores your original DLL to `steam_api64.dll`. It leaves the
+original in `proxy/`, your backups, and your configuration in place.
 
-The Release build uses the static MSVC runtime; no VC runtime installers or
-runtime DLL copies are bundled. A missing system dependency can still stop
-Windows before this mod's diagnostic code runs. Restore/repair the game rather
-than obtaining individual system DLLs from third-party download sites.
+To return to an older mod version, copy its verified DLL from the appropriate
+backup folder after saving the current one. If you have no trustworthy original,
+use your storefront's repair function.
 
-The game still needs a live smoke test after installing: startup, Steam/GOG
-integration, mouse movement/zoom/buttons, F8 (including held-key behavior), F9,
-focus loss/regain, scripted cameras, loading/fast travel, and ferry travel to
-Albatross Island and back. Automated fixture tests are not an in-game test.
+## Manual installation
+
+Use this method if you prefer to manage the copies yourself.
+
+1. Close the game and confirm its executable version in Properties > Details.
+2. Make a separate backup of the original root `steam_api64.dll`.
+3. Create `proxy/` beside the game executable. Copy the original DLL there as
+   `steam_api64_steam.dll` or `steam_api64_gog.dll` for your edition.
+4. Compare SHA-256 checksums of the original, backup, and backend copy with
+   `Get-FileHash -Algorithm SHA256`. Continue only if they match.
+5. Copy the package's mod DLL to the game folder as `steam_api64.dll`. Compare
+   its checksum with the package copy.
+6. Launch through Steam/GOG.
+
+Keep GOG's original dependencies in place. The package's `source/` folder is
+for development and does not belong in the game folder.
+
+## If the game will not start
+
+Look for `lcu-startup.log` beside the installed mod. If that location is not
+writable, check `%TEMP%\LegoCityUndercoverPlus-startup.log`. The log records
+the DLL path, Windows error, and missing export name when available.
+
+| Windows error | What to check |
+| --- | --- |
+| 126 | The original DLL or one of its dependencies is missing. On GOG, check `Galaxy64.dll` too. |
+| 193 | The DLL is invalid or has the wrong architecture. |
+| 127 | The selected DLL lacks a required API/export. |
+| 1114 | DLL initialization failed. Read the mod's log for a more specific cause. |
+
+Keep the original Steam/GOG DLL separate from the mod; renaming the mod as its
+own original will not work. Restore missing game files through the storefront
+rather than downloading individual DLLs.
+
+The Release DLL includes the MSVC runtime through static linking. A missing
+system dependency can still stop Windows before the mod can write a log.
+
+After installing, check mouse movement and zoom, mouse buttons, F8, F9, focus
+changes, loading, scripted cameras, and the ferry trip to Albatross and back.
+Automated tests cannot check how the camera behaves in the game.

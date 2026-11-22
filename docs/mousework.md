@@ -1,117 +1,172 @@
-# Mouse-Camera Work
+# Camera and Raw Input investigation
 
-## Symptoms
+The ferry to Albatross Island exposed three separate failures: a spinning
+camera, a stale camera-mode flag, and lost Raw Input. This record covers the
+October 2026 investigation and the builds tested then. For a shorter explanation,
+read the [camera guide](mousework-human.md).
 
-The original mod normally controlled the third-person camera, but taking the ferry to Albatross Island made the camera spin continuously. After the forced-camera hook was removed, the spin stopped, but a second transition bug became visible: mouse-camera input remained disabled on Albatross and stayed disabled after returning to the mainland.
+All addresses below are relative to executable version **1.0.0.15609011**.
 
-## Diagnosis
+## Findings
 
-The investigation treated the cause as unknown and checked the hook code, the game executable, and the running process.
+### Scripted-camera conflict
 
-Three independent problems were found:
+The mod hooked the forced-camera routine at `0x8ED0A0` and wrote camera
+direction fields on each call. Ferry arrival repeatedly uses that routine, so
+the mod fought the game's scripted camera and caused continuous spinning.
 
-1. The mod hooked the game's scripted/forced-camera routine at RVA `0x8ED0A0` and wrote forced direction fields on every call. Ferry arrival repeatedly uses that path, so the mod continuously fought the scripted camera and produced the spin.
-2. The game-global value at RVA `0x18152A4`, historically treated as `isFirstPerson`, changes to `1` during the ferry transition and remains `1` during ordinary third-person play on Albatross. Treating it as authoritative permanently disabled mouse-camera input.
-3. Raw input used a message-only window owned by the camera-update thread. Windows destroys such a window when its owning thread exits. Loading can replace that thread, leaving the mod with a stale window handle and no registered raw-mouse target.
+Removing that detour stopped the spin. The regular camera-update hook at
+`0x991500` was retained.
 
-Live inspection confirmed the failure state: the camera hook was running, the mod was enabled and focused, `isFirstPerson` was `1`, resynchronization remained pending, and input acceptance was off. The ferry sets the mode flag before the long camera-update gap, which also explained why the first conservative recovery implementation failed: it discarded the last known third-person state too early. Temporarily arming only the mod's recovery gate changed the state to “override active, resync complete, input accepting,” and mouse control immediately resumed. No game state was patched.
+### Stale first-person report
 
-## Fix
+The game-global value at `0x18152A4`, called `isFirstPerson` in the mod,
+changed to `1` during ferry travel and could remain `1` during ordinary
+third-person play on Albatross.
 
-The forced-camera detour at `0x8ED0A0` was removed. The mod now hooks only the regular camera update at RVA `0x991500` and lets scripted camera transitions run normally.
+At the failure point, live inspection showed:
 
-`CameraModeGate` handles the unreliable mode flag without writing to game memory. It records a confirmed third-person camera and, when a load-sized update gap follows, permits a local stale-flag override only after the original game update produces a finite, non-zero third-person orbit. A mode report that arrives just before the ferry gap no longer erases that evidence while the geometry is still third-person. A collapsed/invalid orbit revokes the override, preserving genuine first-person behavior.
+- The camera hook was running.
+- The mod was enabled and the game was focused.
+- `isFirstPerson` was `1`.
+- Camera resynchronization was pending and input acceptance was off.
 
-During resynchronization, the mod:
+The ferry changed the flag before the long camera-update gap. An early recovery
+attempt discarded its previous third-person evidence as soon as the flag
+changed, so it could not recognize the later loading transition.
 
-1. Stops accepting input and clears accumulated deltas.
-2. Calls the original camera update first.
-3. Reconstructs rotation and distance from the game's resulting camera orbit.
-4. Re-enables capture only if focus, enable state, revision, camera mode, and positions are still valid.
+Temporarily arming the mod's recovery gate made the override active,
+resynchronization completed, and input resumed. This changed the mod's state;
+it did not patch the game's flag.
 
-`RawInput` now validates the message-window identity, process, and owning thread. `Update(true)` unregisters stale capture, creates a new queue on the current camera thread, and registers the mouse against it. Disabled updates never create a new queue.
+The resulting `CameraModeGate` keeps prior third-person evidence while the
+orbit remains usable. After a loading gap, it calls the original game update
+and checks the resulting orbit before allowing a local stale-flag override.
+Invalid or collapsed geometry cancels the override. A startup gap alone cannot
+enable it.
 
-The mouse-camera toggle uses `[mouse] toggle` in `lcu.ini` (default `F8`); the window-mode toggle uses `[window] toggle` (default `F9`). Both accept friendly key names, single characters, or decimal/hexadecimal virtual-key codes, and reject mouse-button codes. Initial key-down toggles once. Disabling mouse-camera control releases synthesized buttons, unregisters capture, and clears deltas; re-enabling uses the same camera resynchronization path to avoid a jump. Sensitivity is configured as `[mouse] sensitivity` (default `0.003`, matching the installed `lcu.ini`), and Home/End adjust it by `0.001`.
+### Dead Raw Input target
 
-## Safety Conditions
+After the camera-gate fix, a later inspection found a different failure. The
+camera detour ran about every 15 ms, recovery had completed, and input acceptance
+was on. Raw Input nevertheless reported a registered window handle for which
+`IsWindow` returned false.
 
-- The fix does not modify the game's `isFirstPerson` value.
-- A startup gap alone cannot override a first-person camera.
-- Recovery requires prior third-person evidence, a camera-update gap, and usable post-update orbit geometry.
-- Invalid geometry or a real first-person orbit disables input and clears the override.
-- State revisions prevent an enable/focus transition from racing with the camera thread.
+The hidden Raw Input window belonged to whichever camera worker had created
+it. Loading could replace that worker, causing Windows to destroy the window.
+An interim fix checked the window's identity, process, and thread, then recreated
+it on the current camera worker. That failed again when the replacement worker
+also exited.
 
-## Verification
+The persistent-window design described below superseded that approach on
+October 20, 2026. The earlier implementation notes reflected commit `5168d81`;
+they are not instructions for the current code.
 
-The x64 Release build succeeds. `MouseCameraStateTests` covers toggle edges, stale input, update gaps, orbit rebasing, ferry ordering, and genuine first-person rejection. `RawInputLifecycleTests` uses real Win32 message windows to verify recovery after the original thread exits and migration to a replacement camera thread.
+## Final input and recovery design
 
-Final manual validation should cover:
+Raw Input uses the game's persistent window. The hooked `WndProc` supplies its
+handle through `SetTargetWindow`, passes `WM_INPUT` to `HandleRawInput`, and
+then calls the game's original window procedure. Raw Input does not create a
+hidden window or pump a camera-worker message queue.
 
-1. Normal mainland mouse-camera control.
-2. F8 disable/re-enable without stale motion or a jump.
-3. Mainland → ferry → Albatross, followed by mouse movement.
-4. Albatross → mainland return travel.
-5. A genuine first-person/scripted camera sequence.
+Camera workers call `Update(bool)` to request registration changes. Changing
+targets removes the old registration before using the new one. Destroyed
+targets are detected before capture resumes.
 
-The reverse-engineered RVAs apply to executable version `1.0.0.15609011`.
+After a loading gap or re-enable, camera recovery follows this order:
 
-## Investigation Update — 2026-10-20
+1. Suspend input and clear accumulated movement.
+2. Call the original camera update.
+3. Rebuild rotation and distance from the resulting camera and target positions.
+4. Resume capture only if focus, enabled state, state revision, camera mode, and
+   positions are still valid.
 
-### Why the previous Raw Input recovery still failed
+Disabling also unregisters capture and releases synthesized button presses.
+Initial key-down toggles once; autorepeat does not toggle again.
 
-The first ferry-gate fix was correct, but the installed build still lost mouse input on Albatross. A second live-process inspection separated the camera state from the input transport. At the failure point the camera detour was still running approximately every 15 ms, the mod was enabled and focused, the stale-mode recovery gate was armed, resynchronization had completed, and input acceptance was enabled. However, `RawInput` reported itself registered to an HWND for which `IsWindow` returned false.
+These safeguards remain part of the design:
 
-That evidence identified a lifetime error rather than another camera-mode error. Camera updates can execute on short-lived worker threads. The previous implementation created a message-only Raw Input window on whichever camera thread called `Update(true)`. Windows owns that HWND through the creating thread, so it destroys the window when that worker exits. Recreating the window on a later camera worker only repeats the failure. This supersedes the earlier recovery approach described above; validating and recreating a camera-thread-owned message window is not a durable solution.
+- Never write the game's first-person flag to force recovery.
+- Require prior third-person evidence, an update gap, and a usable post-update
+  orbit before overriding a stale report.
+- Reject invalid geometry and genuine first-person views.
+- Check state revisions before applying a camera-thread decision.
 
-No game memory was changed during diagnosis. A temporary in-process state probe was used only to read the mod state and validate the camera gate.
+The gate still relies on orbit geometry. A special or scripted camera with a
+non-zero horizontal orbit across a loading gap could resemble stale third-person
+state. This remains a narrow risk; test Criminal Scanner and other scripted or
+first-person views when changing the gate.
 
-### Durable Raw Input design
+## October 20, 2026 verification
 
-`RawInput` no longer creates a hidden window or pumps a camera-thread message queue. The already-hooked game `WndProc` now supplies the game's persistent HWND through `SetTargetWindow` and forwards `WM_INPUT` to `HandleRawInput`. The message is still passed to the original game WndProc afterward, preserving normal game handling.
+The Release x64 build, `MouseCameraStateTests`, and `RawInputLifecycleTests`
+passed after the persistent-window change. The recorded build warning was the
+existing double-to-float conversion in `Vector3.cpp`.
 
-Camera workers now only request registration state through `Update(bool)`. Enabling registers mouse input to the persistent game HWND; disabling unregisters it. A destroyed or replaced target is detected before registration, and changing targets first removes the old registration. Consequently, a camera worker can exit without destroying the Raw Input destination.
+Camera-state tests covered F8 edges, state revisions, stale input, update gaps,
+ferry ordering, orbit rebasing, stale-mode recovery, and genuine first-person
+rejection. Raw Input tests used real Win32 registration to check that:
 
-The F8 behavior and camera-transition safeguards remain unchanged: disabling immediately unregisters capture, releases synthesized mouse-button keys, and clears deltas; re-enabling waits for a valid camera update and rebases the orbit before accepting new input.
+1. A persistent target remained valid after the transient camera worker exited.
+2. Destroying and replacing the target removed stale registration and used the
+   replacement window.
 
-### Automated evidence
+Live testing of the persistent-window build confirmed mouse control on
+Albatross and after the return ferry, with no renewed spin. Inspection showed
+current camera updates, completed resynchronization, input acceptance on, and
+Raw Input registered to the same game window.
 
-`RawInputLifecycleTests` now uses a real Win32 Raw Input registration and verifies both important lifetime cases:
+Holding F8 produced one disable transition, recorded at revision 10. Input was
+cleared and capture unregistered. A second key-down enabled control at revision
+11, rebuilt the orbit, and registered capture again. Focus loss independently
+cleared input and unregistered capture.
 
-1. A persistent target window remains valid and registered after the transient camera worker that initializes capture has exited.
-2. Destroying and replacing the target removes stale registration and retargets capture to the replacement HWND.
+The earlier notes that called this ferry validation pending were written before
+that live test. Scripted and genuine first-person views should still be
+rechecked when changing the camera gate.
 
-`MouseCameraStateTests` still covers F8 edge handling, state revisions, input clearing, update gaps, ferry ordering, stale mode recovery, valid orbit rebasing, and genuine first-person rejection. Both test executables pass, and a Release x64 rebuild produces `Release\steam_api64.dll` with intermediates under `Release\obj\`. The only build diagnostic is the pre-existing `Vector3.cpp` double-to-float warning.
+## Floating-point rotation follow-up
 
-### Remaining manual validation
+The old rotation calculation converted a floating-point angle to `int` to
+apply `% 360`. Each update discarded the fraction. This lost small movements
+and made behavior near zero asymmetric because integer conversion truncates
+toward zero.
 
-The redesigned DLL still requires an in-game ferry run when a tester is available. Verify mainland mouse movement, F8 disable/re-enable, mainland to Albatross, continued movement after arrival, return to the mainland, and at least one genuine first-person or scripted-camera sequence. If a failure recurs, capture whether the camera moves under keyboard/controller input and whether F8 disable/re-enable changes the symptom; those observations distinguish camera gating from Raw Input delivery.
+`AdvanceRotation` now uses floating-point math and `std::fmod` to normalize
+angles into `[0, 360)`. The camera detour uses that helper. Regression cases
+for quarter-degree movement and wrapping below zero and above 360 failed before
+the change and passed afterward. The Release build and Raw Input tests passed.
 
-### Installed artifact
+The owner then tested the smoothing build at `sensitivity=0.160000` and
+confirmed smooth slow movement. An earlier INI read of `3.280027` was a
+historical setting, not a recommended default. The default sensitivity is
+`0.003`; Home/End adjust it by `0.001`.
 
-The failing DLL inspected during the final live session had SHA-256 `55CDF534322E939F0EEA09D8E03E40550BD071540D1063F57159300E582E565D`. After the persistent-HWND change, the freshly rebuilt DLL and the copy installed in the game directory both have SHA-256 `6A5CF165507058564C629C15DFD5EDE533712056474C8655204496A889FBEAE5`. The game was not running during replacement, and `steam_api64.pre-codex.dll` remains the untouched original backup.
+## Historical DLL hashes
 
-### Final live validation — 2026-10-20
+These identify intermediate camera builds, not the v1.0.0 release ZIP or the
+later v1.0.1 startup/release build.
 
-The installed `6A5CF...AE5` build was tested in the running game while a read-only external state probe watched the mod globals. Mouse-camera control worked on Albatross, continued working after ferry travel back to the mainland, and did not resume the original spin. After each active transition the camera detour was current, resynchronization was clear, input acceptance was enabled, and Raw Input was registered to the same persistent game HWND.
+| Build | SHA-256 |
+| --- | --- |
+| Failing DLL inspected before the persistent-window fix | `55CDF534322E939F0EEA09D8E03E40550BD071540D1063F57159300E582E565D` |
+| Persistent-window build; built and installed copies matched | `6A5CF165507058564C629C15DFD5EDE533712056474C8655204496A889FBEAE5` |
+| Floating-point smoothing build; built and installed copies matched | `C91F779BC2B9C803BCDD38AB377FE4980D4D40F2EA0269D9FAC11AA578C67041` |
 
-The F8 lifecycle was also validated live. Holding F8 caused one disable transition (revision 10): input acceptance became false, deltas remained clear, and Raw Input unregistered. The held key did not toggle repeatedly. A second F8 key-down caused one enable transition (revision 11), completed camera resynchronization, restored input acceptance, and re-registered Raw Input. Focus loss afterward independently cleared and unregistered input as designed.
+The game was stopped during replacement, and `steam_api64.pre-codex.dll` was
+retained as an untouched backup during that investigation.
 
-This completes the manual ferry-to-Albatross, return-ferry, hotkey-edge, disable cleanup, and re-enable recovery checks for executable version `1.0.0.15609011`.
+## Retesting camera changes
 
-### Handoff boundary
+Check mainland movement and scrolling, F8 disable/re-enable and held-key
+behavior, focus loss/regain, loading and fast travel, ferry travel in both
+directions, Criminal Scanner, and other scripted or genuine first-person views.
+Use small mouse movements to catch a return of integer rounding.
 
-The post-commit work begins at **Investigation Update — 2026-10-20**. Everything before that heading reflects commit `5168d81`; the appended material records only the subsequent live diagnosis, final Raw Input redesign, build/install, and successful in-game validation.
+If input fails, record whether keyboard/controller camera movement still works,
+whether F8 changes the symptom, and whether `WM_INPUT` reaches the persistent
+game window. Those observations help distinguish camera-mode rejection from
+lost mouse delivery.
 
-### Smooth-rotation follow-up — 2026-10-20
-
-The original camera calculation converted the updated floating-point angle to `int` solely to use integer `% 360`. That discarded fractional degrees on every camera update, made opposite directions asymmetric because integer conversion truncates toward zero, and prevented small sensitivity adjustments from accumulating smoothly.
-
-`AdvanceRotation` now performs the complete calculation in floating point and uses `std::fmod` to normalize into `[0, 360)` without losing the fraction. `UpdateCamDetour` calls this tested helper instead of the integer expression. Regression cases cover quarter-degree movement plus wrapping below 0° and above 360°; the tests were observed failing before the helper existed and passing afterward. The full Release x64 build and Raw Input lifecycle suite also pass.
-
-The rebuilt and installed DLL both have SHA-256 `C91F779BC2B9C803BCDD38AB377FE4980D4D40F2EA0269D9FAC11AA578C67041`. Manual feel testing remains pending. The saved `lcu.ini` sensitivity was `3.280027` at installation time, which is still more than three degrees per raw mouse count; use a value such as `0.25` when specifically evaluating sub-degree motion.
-
-### Smooth-rotation live validation — 2026-10-20
-
-The installed `C91F...7041` build was tested in game with `sensitivity=0.160000`. Slow horizontal camera movement was reported as “smooth as butter,” confirming that fractional rotation now survives from raw mouse input through the camera calculation. The earlier `3.280027` value was a historical read of the same INI before the game later saved `0.160000`; no additional sensitivity change is needed.
-
-The production call site is commented to record why `AdvanceRotation` must remain floating-point: the former integer modulo discarded sub-degree movement and made low-speed rotation asymmetric. Automated coverage protects fractional movement and wrapping across both 0° and 360°.
+The later [startup investigation](release-startup-analysis.md) records the
+v1.0.1 automated checks and the owner's subsequent Steam installation report.

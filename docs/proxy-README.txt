@@ -1,11 +1,15 @@
-This directory deliberately contains no proprietary DLLs.
+The mod needs the original steam_api64.dll from your own game installation.
+This package does not include Steam/GOG proprietary DLLs.
 
-Before installing the mod at the game root, preserve the original steam_api64.dll
-from your OWN clean LEGO City Undercover installation as ONE of:
+The installer preserves that original here as:
 
   Steam: proxy/steam_api64_steam.dll
   GOG:   proxy/steam_api64_gog.dll
 
-Keep GOG's original Galaxy64.dll and other dependencies beside the game EXE.
-Never rename the mod DLL as its own backend. See INSTALL.md and Install.ps1.
-Public availability of upstream DLLs does not establish redistribution rights.
+Only your edition's DLL is needed. For GOG, leave Galaxy64.dll and the game's
+other original dependencies beside the executable.
+
+For manual installation, copy the original DLL here before replacing the root
+DLL with the mod. Never use the mod itself as the original.
+
+See INSTALL.md and Install.ps1 in the package's top folder.
